@@ -14,9 +14,6 @@ import anthropic
 _MODEL = "claude-haiku-4-5-20251001"
 _client = anthropic.Anthropic()
 
-_TODAY = date.today().strftime("%-d %B %Y") if hasattr(date.today(), "strftime") else date.today().strftime("%d %B %Y").lstrip("0")
-
-
 def _today_formatted() -> str:
     d = date.today()
     return f"{d.day} {d.strftime('%B')} {d.year}"
