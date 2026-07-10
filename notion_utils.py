@@ -58,10 +58,20 @@ def mark_done(page_id: str, drive_url: str | None, api_key: str | None = None):
 
 
 def mark_error(page_id: str, error_msg: str, api_key: str | None = None):
-    _client(api_key).pages.update(page_id, properties={
-        "Status": {"select": {"name": "Error"}},
-        "Notes": {"rich_text": [{"type": "text", "text": {"content": error_msg[:2000]}}]},
-    })
+    """Set Status = Error, with the error message in Notes if that property exists.
+
+    Some tenant databases don't have a Notes property. Writing it would make the
+    whole update call fail, leaving Status stuck at Processing — so Status is
+    always set first, on its own, then Notes is attempted separately.
+    """
+    client = _client(api_key)
+    client.pages.update(page_id, properties={"Status": {"select": {"name": "Error"}}})
+    try:
+        client.pages.update(page_id, properties={
+            "Notes": {"rich_text": [{"type": "text", "text": {"content": error_msg[:2000]}}]},
+        })
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

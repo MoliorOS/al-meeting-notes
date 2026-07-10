@@ -82,6 +82,10 @@ Rules:
 """
 
 
+class LLMJSONError(Exception):
+    """Raised when the model's JSON output could not be parsed, even after a repair attempt."""
+
+
 def _extract_json(raw: str) -> str:
     """Strip markdown fences and return the innermost JSON text."""
     text = raw.strip()
@@ -96,6 +100,40 @@ def _extract_json(raw: str) -> str:
         if start != -1 and end > start:
             return text[start:end + 1]
     return text
+
+
+def _parse_json(raw: str) -> dict | list:
+    """
+    Parse the model's JSON output, self-healing once if it's invalid.
+
+    Meeting content routinely contains quoted phrases (e.g. `referred to as
+    "Corridor"`) that models sometimes copy into JSON string values without
+    escaping the inner quotes, breaking json.loads. Rather than fail the whole
+    pipeline run on that, ask the model to fix its own output once before
+    giving up.
+    """
+    candidate = _extract_json(raw)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as e:
+        print(f"[llm_pipeline] invalid JSON from model ({e}) — attempting repair")
+        repair_msg = (
+            f"This text was supposed to be valid JSON but failed to parse: {e}\n"
+            "Common cause: an unescaped double-quote inside a string value. "
+            "Return ONLY the corrected, valid JSON — no explanation, no markdown fences.\n\n"
+            f"{candidate}"
+        )
+        resp = _client.messages.create(
+            model=_MODEL,
+            max_tokens=8096,
+            system="You fix malformed JSON. Return ONLY valid JSON, nothing else.",
+            messages=[{"role": "user", "content": repair_msg}],
+        )
+        repaired = _extract_json(resp.content[0].text.strip())
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError as e2:
+            raise LLMJSONError(f"Model JSON invalid even after repair attempt: {e2}") from e2
 
 
 def extract_metadata(page_text: str) -> dict:
@@ -113,7 +151,7 @@ def extract_metadata(page_text: str) -> dict:
         messages=[{"role": "user", "content": user_msg}],
     )
     raw = resp.content[0].text.strip()
-    return json.loads(_extract_json(raw))
+    return _parse_json(raw)
 
 
 _MAX_SECTION_INPUT = 6_000  # typical meeting ~3-5k chars; cap protects output token limit
@@ -134,5 +172,5 @@ def structure_sections(page_text: str) -> list:
         messages=[{"role": "user", "content": page_text}],
     )
     raw = resp.content[0].text.strip()
-    result = json.loads(_extract_json(raw))
+    result = _parse_json(raw)
     return result.get("sections", result) if isinstance(result, dict) else result

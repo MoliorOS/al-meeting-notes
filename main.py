@@ -24,6 +24,10 @@ from scripts.generate_docx import generate_docx
 _TENANTS: dict = json.loads(os.environ.get("NOTION_TENANTS", "{}"))
 
 
+class MeetingNotReadyError(Exception):
+    """Notion AI hasn't finished generating the summary yet — safe for Notion to retry."""
+
+
 def _normalize_id(id_str: str) -> str:
     return id_str.replace("-", "")
 
@@ -71,7 +75,7 @@ def process_meeting(page_id: str, api_key: str | None = None) -> dict:
         page_data = fetch_meeting_page(page_id, api_key=api_key)
 
         if not page_data["blocks"]:
-            raise ValueError("Meeting page has no summary blocks — Notion AI may still be processing.")
+            raise MeetingNotReadyError("Meeting page has no summary blocks — Notion AI may still be processing.")
 
         page_text = extract_page_text(page_data)
 
@@ -145,7 +149,7 @@ async def webhook_notion(request: Request):
 
     try:
         return JSONResponse(process_meeting(page_id, api_key=api_key))
-    except ValueError as e:
+    except MeetingNotReadyError as e:
         # Notion AI still generating — return 503 so Notion Automations retries
         print(f"[webhook/notion] retryable on {page_id}: {e}")
         return JSONResponse({"status": "retry", "reason": str(e)}, status_code=503)
