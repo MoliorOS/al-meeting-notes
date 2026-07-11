@@ -29,7 +29,7 @@ Notion Automation fires webhook → POST /webhook/notion
 10. Mark Status = Done, write Drive URL to Document property
 ```
 
-If anything in steps 3–10 fails: Status is set to `Error` and the error message is written to the `Notes` property on the Notion page.
+If anything in steps 1–10 fails — including the initial status check or the Processing write itself — Status is set to `Error` and the error message is written to the `Notes` property on the Notion page (best-effort: if Notion is unreachable enough that even that write fails, the page is left as-is for a retry).
 
 ---
 

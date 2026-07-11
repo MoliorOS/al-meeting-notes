@@ -56,13 +56,13 @@ def process_meeting(page_id: str) -> dict:
     9. Upload to Google Drive.
     10. Mark as Done with Drive URL.
     """
-    status = read_meeting_status(page_id)
-    if status in ("Done", "Processing"):
-        return {"status": "skipped", "reason": f"page is already {status}"}
-
-    mark_processing(page_id)
-
     try:
+        status = read_meeting_status(page_id)
+        if status in ("Done", "Processing"):
+            return {"status": "skipped", "reason": f"page is already {status}"}
+
+        mark_processing(page_id)
+
         page_data = fetch_meeting_page(page_id)
 
         if not page_data["blocks"]:
