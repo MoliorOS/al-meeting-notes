@@ -9,9 +9,8 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
-      - key: NOTION_TENANTS
+      - key: NOTION_API_KEY
         sync: false
-        # JSON: {"<db_id_no_dashes>": {"api_key": "secret_...", "name": "Jon"}, ...}
       - key: GOOGLE_DRIVE_FOLDER_ID
         sync: false
       - key: GOOGLE_SERVICE_ACCOUNT_JSON

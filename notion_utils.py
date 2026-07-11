@@ -22,8 +22,8 @@ _CONTENT_TYPES = {
 _HEADING_TYPES = {"heading_1", "heading_2", "heading_3"}
 
 
-def _client(api_key: str | None = None) -> Client:
-    return Client(auth=api_key or os.environ["NOTION_API_KEY"])
+def _client() -> Client:
+    return Client(auth=os.environ["NOTION_API_KEY"])
 
 
 def _rt_to_str(rich_text: list) -> str:
@@ -34,16 +34,9 @@ def _rt_to_str(rich_text: list) -> str:
 # Meeting page status operations
 # ---------------------------------------------------------------------------
 
-def get_page_database_id(page_id: str, api_key: str | None = None) -> str:
-    """Return the (dash-containing) database_id that a page currently lives under, or ''."""
-    page = _client(api_key).pages.retrieve(page_id)
-    parent = page.get("parent", {})
-    return parent.get("database_id", "") or ""
-
-
-def read_meeting_status(page_id: str, api_key: str | None = None) -> str:
+def read_meeting_status(page_id: str) -> str:
     """Read the Status select value from a meeting page. Returns '' if not set."""
-    page = _client(api_key).pages.retrieve(page_id)
+    page = _client().pages.retrieve(page_id)
     props = page.get("properties", {})
     status_prop = props.get("Status", {})
     if status_prop.get("select"):
@@ -51,27 +44,27 @@ def read_meeting_status(page_id: str, api_key: str | None = None) -> str:
     return ""
 
 
-def mark_processing(page_id: str, api_key: str | None = None):
-    _client(api_key).pages.update(page_id, properties={
+def mark_processing(page_id: str):
+    _client().pages.update(page_id, properties={
         "Status": {"select": {"name": "Processing"}},
     })
 
 
-def mark_done(page_id: str, drive_url: str | None, api_key: str | None = None):
+def mark_done(page_id: str, drive_url: str | None):
     props: dict = {"Status": {"select": {"name": "Done"}}}
     if drive_url:
         props["Document"] = {"url": drive_url}
-    _client(api_key).pages.update(page_id, properties=props)
+    _client().pages.update(page_id, properties=props)
 
 
-def mark_error(page_id: str, error_msg: str, api_key: str | None = None):
+def mark_error(page_id: str, error_msg: str):
     """Set Status = Error, with the error message in Notes if that property exists.
 
-    Some tenant databases don't have a Notes property. Writing it would make the
+    Some databases don't have a Notes property. Writing it would make the
     whole update call fail, leaving Status stuck at Processing — so Status is
     always set first, on its own, then Notes is attempted separately.
     """
-    client = _client(api_key)
+    client = _client()
     client.pages.update(page_id, properties={"Status": {"select": {"name": "Error"}}})
     try:
         client.pages.update(page_id, properties={
@@ -131,7 +124,7 @@ def _extract_attendees(meeting_notes_block: dict) -> list[str]:
     return names
 
 
-def fetch_meeting_page(page_id: str, api_key: str | None = None) -> dict:
+def fetch_meeting_page(page_id: str) -> dict:
     """
     Fetch a Notion meeting recording page.
     Only the AI-generated summary section is extracted — not notes or transcript.
@@ -141,7 +134,7 @@ def fetch_meeting_page(page_id: str, api_key: str | None = None) -> dict:
         blocks    list      — summary blocks only
         attendees list[str] — names from the meeting_notes attendee list (may be empty)
     """
-    notion = _client(api_key)
+    notion = _client()
     page = notion.pages.retrieve(page_id)
 
     props = page.get("properties", {})

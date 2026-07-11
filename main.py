@@ -1,5 +1,3 @@
-import json
-import os
 import re
 import tempfile
 from contextlib import asynccontextmanager
@@ -13,7 +11,6 @@ from llm_pipeline import extract_metadata, structure_sections
 from notion_utils import (
     extract_page_text,
     fetch_meeting_page,
-    get_page_database_id,
     mark_done,
     mark_error,
     mark_processing,
@@ -21,16 +18,9 @@ from notion_utils import (
 )
 from scripts.generate_docx import generate_docx
 
-# {"<db_id_no_dashes>": {"api_key": "secret_...", "name": "Jon"}, ...}
-_TENANTS: dict = json.loads(os.environ.get("NOTION_TENANTS", "{}"))
-
 
 class MeetingNotReadyError(Exception):
     """Notion AI hasn't finished generating the summary yet — safe for Notion to retry."""
-
-
-def _normalize_id(id_str: str) -> str:
-    return id_str.replace("-", "")
 
 
 @asynccontextmanager
@@ -51,7 +41,7 @@ def health():
 # Core pipeline
 # ---------------------------------------------------------------------------
 
-def process_meeting(page_id: str, api_key: str | None = None) -> dict:
+def process_meeting(page_id: str) -> dict:
     """
     Full pipeline for one meeting page:
 
@@ -66,14 +56,14 @@ def process_meeting(page_id: str, api_key: str | None = None) -> dict:
     9. Upload to Google Drive.
     10. Mark as Done with Drive URL.
     """
-    status = read_meeting_status(page_id, api_key=api_key)
+    status = read_meeting_status(page_id)
     if status in ("Done", "Processing"):
         return {"status": "skipped", "reason": f"page is already {status}"}
 
-    mark_processing(page_id, api_key=api_key)
+    mark_processing(page_id)
 
     try:
-        page_data = fetch_meeting_page(page_id, api_key=api_key)
+        page_data = fetch_meeting_page(page_id)
 
         if not page_data["blocks"]:
             raise MeetingNotReadyError("Meeting page has no summary blocks — Notion AI may still be processing.")
@@ -95,7 +85,7 @@ def process_meeting(page_id: str, api_key: str | None = None) -> dict:
         generate_docx(doc_data, Path(tmp_path))
         drive_url = upload_to_drive(tmp_path, filename)
 
-        mark_done(page_id, drive_url, api_key=api_key)
+        mark_done(page_id, drive_url)
 
         return {
             "status": "done",
@@ -110,7 +100,7 @@ def process_meeting(page_id: str, api_key: str | None = None) -> dict:
         error_msg = str(e)
         print(f"[pipeline] Error processing {page_id}: {error_msg}")
         try:
-            mark_error(page_id, error_msg, api_key=api_key)
+            mark_error(page_id, error_msg)
         except Exception:
             pass
         raise
@@ -136,27 +126,20 @@ async def webhook_notion_verify():
     return {"status": "ok"}
 
 
-def _extract_page_and_db_id(body: dict) -> tuple[str | None, str | None]:
-    """Return (page_id, raw_db_id_or_None) from either payload shape. raw_db_id
-    may be None even when page_id is present — the integration-webhook event
-    envelope doesn't always carry the parent database id, so the caller must
-    be prepared to look it up via the Notion API instead."""
+def _extract_page_id(body: dict) -> str | None:
+    """Return the page id from either the automation payload or the
+    integration-webhook event payload."""
     event_type = body.get("type")
     if event_type is not None:
         if event_type not in _SUBSCRIBED_EVENT_TYPES:
-            return None, None
+            return None
         entity = body.get("entity") or {}
         if entity.get("type") != "page":
-            return None, None
-        page_id = entity.get("id")
-        raw_db_id = ((body.get("data") or {}).get("parent") or {}).get("database_id")
-        return page_id, raw_db_id
+            return None
+        return entity.get("id")
 
     # Legacy database-automation payload
-    data = body.get("data", {})
-    page_id = data.get("id")
-    raw_db_id = (data.get("parent") or {}).get("database_id")
-    return page_id, raw_db_id
+    return body.get("data", {}).get("id")
 
 
 @app.post("/webhook/notion")
@@ -168,36 +151,13 @@ async def webhook_notion(request: Request):
         print(f"[webhook/notion] verification_token: {body['verification_token']}")
         return JSONResponse({"status": "ok"})
 
-    page_id, raw_db_id = _extract_page_and_db_id(body)
+    page_id = _extract_page_id(body)
 
     if not page_id:
         return JSONResponse({"status": "skipped", "reason": "no page id in payload"})
 
-    if not raw_db_id:
-        # Integration-webhook events don't always include the parent database id.
-        # We don't yet know which tenant this page belongs to, so try each
-        # tenant's key in turn until one can actually read the page.
-        for candidate_tenant in _TENANTS.values():
-            try:
-                raw_db_id = get_page_database_id(page_id, api_key=candidate_tenant.get("api_key"))
-                break
-            except Exception:
-                continue
-
-    db_id = _normalize_id(raw_db_id or "")
-
-    tenant = _TENANTS.get(db_id)
-    if not tenant:
-        print(f"[webhook/notion] unknown db_id: {db_id!r} — check NOTION_TENANTS")
-        return JSONResponse(
-            {"status": "skipped", "reason": f"unknown database {db_id}"},
-            status_code=400,
-        )
-
-    api_key = tenant.get("api_key") or os.environ.get("NOTION_API_KEY")
-
     try:
-        return JSONResponse(process_meeting(page_id, api_key=api_key))
+        return JSONResponse(process_meeting(page_id))
     except MeetingNotReadyError as e:
         # Notion AI still generating — return 503 so Notion Automations retries
         print(f"[webhook/notion] retryable on {page_id}: {e}")
@@ -215,20 +175,9 @@ async def webhook_notion(request: Request):
 # ---------------------------------------------------------------------------
 
 @app.get("/manual")
-def manual(page_id: str, db_id: str | None = None):
-    """
-    Manually trigger the pipeline for a meeting page.
-
-    page_id: the Notion page ID of the meeting recording.
-    db_id:   optional — the database ID (with or without dashes) used to look up
-             the tenant API key. If omitted, falls back to NOTION_API_KEY env var.
-    """
-    api_key = None
-    if db_id:
-        tenant = _TENANTS.get(_normalize_id(db_id))
-        if tenant:
-            api_key = tenant.get("api_key")
+def manual(page_id: str):
+    """Manually trigger the pipeline for a meeting page."""
     try:
-        return process_meeting(page_id, api_key=api_key)
+        return process_meeting(page_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
