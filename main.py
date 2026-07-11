@@ -174,9 +174,15 @@ async def webhook_notion(request: Request):
         return JSONResponse({"status": "skipped", "reason": "no page id in payload"})
 
     if not raw_db_id:
-        # Integration-webhook events don't always include the parent database id —
-        # look it up directly so we can still resolve the right tenant.
-        raw_db_id = get_page_database_id(page_id, api_key=os.environ.get("NOTION_API_KEY"))
+        # Integration-webhook events don't always include the parent database id.
+        # We don't yet know which tenant this page belongs to, so try each
+        # tenant's key in turn until one can actually read the page.
+        for candidate_tenant in _TENANTS.values():
+            try:
+                raw_db_id = get_page_database_id(page_id, api_key=candidate_tenant.get("api_key"))
+                break
+            except Exception:
+                continue
 
     db_id = _normalize_id(raw_db_id or "")
 
