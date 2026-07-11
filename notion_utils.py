@@ -34,6 +34,13 @@ def _rt_to_str(rich_text: list) -> str:
 # Meeting page status operations
 # ---------------------------------------------------------------------------
 
+def get_page_database_id(page_id: str, api_key: str | None = None) -> str:
+    """Return the (dash-containing) database_id that a page currently lives under, or ''."""
+    page = _client(api_key).pages.retrieve(page_id)
+    parent = page.get("parent", {})
+    return parent.get("database_id", "") or ""
+
+
 def read_meeting_status(page_id: str, api_key: str | None = None) -> str:
     """Read the Status select value from a meeting page. Returns '' if not set."""
     page = _client(api_key).pages.retrieve(page_id)

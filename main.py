@@ -13,6 +13,7 @@ from llm_pipeline import extract_metadata, structure_sections
 from notion_utils import (
     extract_page_text,
     fetch_meeting_page,
+    get_page_database_id,
     mark_done,
     mark_error,
     mark_processing,
@@ -116,12 +117,46 @@ def process_meeting(page_id: str, api_key: str | None = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Webhook — Notion Automation fires this on page created
+# Webhook — fires on:
+#   - legacy Notion database Automation ("Send webhook" action), payload shape
+#     {"source": {...}, "data": {<page object>}}
+#   - Notion API integration webhook subscription (e.g. page.moved, page.created),
+#     payload shape {"type": "page.moved", "entity": {"id": "...", "type": "page"}, ...}
+#   - the one-time subscription verification handshake {"verification_token": "..."}
 # ---------------------------------------------------------------------------
+
+# Event types we act on from an integration-webhook subscription. Others
+# (page.content_updated, page.properties_updated, ...) are ignored — they'd
+# otherwise fire repeatedly while Notion AI is still writing the summary.
+_SUBSCRIBED_EVENT_TYPES = {"page.moved", "page.created"}
+
 
 @app.get("/webhook/notion")
 async def webhook_notion_verify():
     return {"status": "ok"}
+
+
+def _extract_page_and_db_id(body: dict) -> tuple[str | None, str | None]:
+    """Return (page_id, raw_db_id_or_None) from either payload shape. raw_db_id
+    may be None even when page_id is present — the integration-webhook event
+    envelope doesn't always carry the parent database id, so the caller must
+    be prepared to look it up via the Notion API instead."""
+    event_type = body.get("type")
+    if event_type is not None:
+        if event_type not in _SUBSCRIBED_EVENT_TYPES:
+            return None, None
+        entity = body.get("entity") or {}
+        if entity.get("type") != "page":
+            return None, None
+        page_id = entity.get("id")
+        raw_db_id = ((body.get("data") or {}).get("parent") or {}).get("database_id")
+        return page_id, raw_db_id
+
+    # Legacy database-automation payload
+    data = body.get("data", {})
+    page_id = data.get("id")
+    raw_db_id = (data.get("parent") or {}).get("database_id")
+    return page_id, raw_db_id
 
 
 @app.post("/webhook/notion")
@@ -129,13 +164,21 @@ async def webhook_notion(request: Request):
     body = await request.json()
     print(f"[webhook/notion] payload: {body}")
 
-    data = body.get("data", {})
-    page_id = data.get("id")
-    raw_db_id = (data.get("parent") or {}).get("database_id", "")
-    db_id = _normalize_id(raw_db_id)
+    if "verification_token" in body:
+        print(f"[webhook/notion] verification_token: {body['verification_token']}")
+        return JSONResponse({"status": "ok"})
+
+    page_id, raw_db_id = _extract_page_and_db_id(body)
 
     if not page_id:
         return JSONResponse({"status": "skipped", "reason": "no page id in payload"})
+
+    if not raw_db_id:
+        # Integration-webhook events don't always include the parent database id —
+        # look it up directly so we can still resolve the right tenant.
+        raw_db_id = get_page_database_id(page_id, api_key=os.environ.get("NOTION_API_KEY"))
+
+    db_id = _normalize_id(raw_db_id or "")
 
     tenant = _TENANTS.get(db_id)
     if not tenant:
