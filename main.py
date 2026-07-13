@@ -1,6 +1,7 @@
 import re
 import tempfile
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -21,6 +22,14 @@ from scripts.generate_docx import generate_docx
 
 class MeetingNotReadyError(Exception):
     """Notion AI hasn't finished generating the summary yet — safe for Notion to retry."""
+
+
+def _yy_mm_dd(date_str: str) -> str:
+    """Reverse-order date (yy-mm-dd) for sortable filenames, per AL's naming convention."""
+    try:
+        return datetime.strptime(date_str, "%d %B %Y").strftime("%y-%m-%d")
+    except (ValueError, TypeError):
+        return date_str.replace(" ", "-") or "unknown-date"
 
 
 @asynccontextmanager
@@ -75,9 +84,9 @@ def process_meeting(page_id: str) -> dict:
 
         doc_data = {**metadata, "sections": sections}
 
-        slug = re.sub(r"[^\w]", "", (metadata.get("project") or "Meeting").replace(" ", ""))[:30]
-        date_slug = (metadata.get("date") or "").replace(" ", "")
-        filename = f"MeetingNotes_{slug}_{date_slug}.docx"
+        meeting_name = re.sub(r"[^\w\s-]", "", metadata.get("project") or "Meeting").strip()[:60]
+        date_slug = _yy_mm_dd(metadata.get("date") or "")
+        filename = f"{date_slug}_{meeting_name}_AL Notes.docx"
 
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             tmp_path = tmp.name
