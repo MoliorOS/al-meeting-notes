@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from drive import upload_to_drive
@@ -50,25 +50,24 @@ def health():
 # Core pipeline
 # ---------------------------------------------------------------------------
 
-def process_meeting(page_id: str) -> dict:
+def claim_meeting(page_id: str) -> str | None:
     """
-    Full pipeline for one meeting page:
+    Fast, synchronous portion of the pipeline — cheap enough to run inline
+    before responding to Notion's webhook:
 
     1. Check status — skip if already Done or Processing.
     2. Mark as Processing.
     3. Fetch the Notion AI meeting recording page.
     4. Render blocks to LLM-readable text.
-    5. Extract metadata (LLM).
-    6. Structure sections (LLM).
-    7. Assemble final JSON.
-    8. Generate DOCX from template.
-    9. Upload to Google Drive.
-    10. Mark as Done with Drive URL.
+
+    Returns the page text if the meeting is ready to process, or None if it
+    was already Done/Processing and should be skipped. Raises
+    MeetingNotReadyError if Notion AI hasn't finished writing the summary yet.
     """
     try:
         status = read_meeting_status(page_id)
         if status in ("Done", "Processing"):
-            return {"status": "skipped", "reason": f"page is already {status}"}
+            return None
 
         mark_processing(page_id)
 
@@ -77,8 +76,32 @@ def process_meeting(page_id: str) -> dict:
         if not page_data["blocks"]:
             raise MeetingNotReadyError("Meeting page has no summary blocks — Notion AI may still be processing.")
 
-        page_text = extract_page_text(page_data)
+        return extract_page_text(page_data)
 
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[pipeline] Error claiming {page_id}: {error_msg}")
+        try:
+            mark_error(page_id, error_msg)
+        except Exception:
+            pass
+        raise
+
+
+def run_pipeline(page_id: str, page_text: str) -> dict:
+    """
+    Slow portion of the pipeline — LLM calls, DOCX generation, Drive upload.
+    Runs after Notion has already been ack'd, so it isn't subject to the
+    webhook delivery timeout:
+
+    5. Extract metadata (LLM).
+    6. Structure sections (LLM).
+    7. Assemble final JSON.
+    8. Generate DOCX from template.
+    9. Upload to Google Drive.
+    10. Mark as Done with Drive URL.
+    """
+    try:
         metadata = extract_metadata(page_text)
         sections = structure_sections(page_text)
 
@@ -113,6 +136,23 @@ def process_meeting(page_id: str) -> dict:
         except Exception:
             pass
         raise
+
+
+def process_meeting(page_id: str) -> dict:
+    """Full pipeline, run synchronously start to finish. Used by /manual."""
+    page_text = claim_meeting(page_id)
+    if page_text is None:
+        return {"status": "skipped", "reason": "page is already Done or Processing"}
+    return run_pipeline(page_id, page_text)
+
+
+def process_meeting_background(page_id: str, page_text: str) -> None:
+    """Fire-and-forget wrapper for BackgroundTasks — errors are already
+    recorded on the page by run_pipeline, nothing left to propagate to."""
+    try:
+        run_pipeline(page_id, page_text)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +192,7 @@ def _extract_page_id(body: dict) -> str | None:
 
 
 @app.post("/webhook/notion")
-async def webhook_notion(request: Request):
+async def webhook_notion(request: Request, background_tasks: BackgroundTasks):
     body = await request.json()
     print(f"[webhook/notion] payload: {body}")
 
@@ -166,7 +206,7 @@ async def webhook_notion(request: Request):
         return JSONResponse({"status": "skipped", "reason": "no page id in payload"})
 
     try:
-        return JSONResponse(process_meeting(page_id))
+        page_text = claim_meeting(page_id)
     except MeetingNotReadyError as e:
         # Notion AI still generating — return 503 so Notion Automations retries
         print(f"[webhook/notion] retryable on {page_id}: {e}")
@@ -177,6 +217,14 @@ async def webhook_notion(request: Request):
             {"status": "error", "page_id": page_id, "reason": str(e)},
             status_code=500,
         )
+
+    if page_text is None:
+        return JSONResponse({"status": "skipped", "reason": "page is already Done or Processing"})
+
+    # Ack Notion immediately — the LLM/DOCX/Drive work runs after the response
+    # goes out, so it's no longer subject to Notion's webhook delivery timeout.
+    background_tasks.add_task(process_meeting_background, page_id, page_text)
+    return JSONResponse({"status": "accepted", "page_id": page_id})
 
 
 # ---------------------------------------------------------------------------
