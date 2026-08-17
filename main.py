@@ -1,3 +1,7 @@
+import hashlib
+import hmac
+import json
+import os
 import re
 import tempfile
 from contextlib import asynccontextmanager
@@ -170,6 +174,27 @@ def process_meeting_background(page_id: str, page_text: str) -> None:
 _SUBSCRIBED_EVENT_TYPES = {"page.moved", "page.created"}
 
 
+def _verify_notion_signature(raw_body: bytes, header_sig: str | None) -> bool:
+    """
+    Verify Notion's per-event webhook signature (sent as `X-Notion-Signature:
+    sha256=<hex>`, HMAC-SHA256 over the raw request body keyed by the
+    `verification_token` captured during the one-time subscription handshake
+    — see https://developers.notion.com/reference/webhooks). Only applies to
+    the "Notion API integration webhook subscription" delivery path; Notion's
+    legacy database Automation "Send a webhook" action has no signing
+    mechanism at all, so that path stays unauthenticated by Notion's own
+    design (defense against it is network-level: this endpoint's URL is not
+    published anywhere, and this is the only public path on the host).
+    """
+    secret = os.environ.get("NOTION_WEBHOOK_SECRET")
+    if not secret:
+        return True
+    if not header_sig:
+        return False
+    expected = "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header_sig)
+
+
 @app.get("/webhook/notion")
 async def webhook_notion_verify():
     return {"status": "ok"}
@@ -193,12 +218,21 @@ def _extract_page_id(body: dict) -> str | None:
 
 @app.post("/webhook/notion")
 async def webhook_notion(request: Request, background_tasks: BackgroundTasks):
-    body = await request.json()
+    raw_body = await request.body()
+    body = json.loads(raw_body)
     print(f"[webhook/notion] payload: {body}")
 
     if "verification_token" in body:
+        # One-time handshake, unsigned by definition (there's no secret yet
+        # to sign with — this request is what MINTS the secret). Always
+        # trusted regardless of NOTION_WEBHOOK_SECRET; harmless (no data
+        # access) and this is the only way Notion re-verifies a subscription.
         print(f"[webhook/notion] verification_token: {body['verification_token']}")
         return JSONResponse({"status": "ok"})
+
+    if not _verify_notion_signature(raw_body, request.headers.get("x-notion-signature")):
+        print("[webhook/notion] rejected: invalid or missing X-Notion-Signature")
+        raise HTTPException(status_code=401, detail="invalid signature")
 
     page_id = _extract_page_id(body)
 

@@ -72,20 +72,26 @@ requirements.txt
 | `NOTION_API_KEY` | Yes | Internal integration secret for the shared Meetings DB |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Yes | Full Google service account JSON (as a string) |
 | `GOOGLE_DRIVE_FOLDER_ID` | No | Drive folder to upload docs into — service skips upload if unset |
+| `NOTION_WEBHOOK_SECRET` | No | The `verification_token` from the integration webhook subscription's handshake (see "Notion setup" below). Once set, every `/webhook/notion` POST except the handshake itself must carry a valid `X-Notion-Signature`, or it's rejected with 401 — closes off the endpoint to anyone who just guesses/finds the URL. Leave unset only while doing local/manual testing; the legacy database-Automation "Send a webhook" path has no signing mechanism at all and will start getting 401'd once this is set (see caveat in "Notion setup"). |
 
 There is a single shared Notion database and a single shared Google Drive folder — no per-user or per-tenant credentials.
 
 ---
 
-## Deploying to Render
+## Deploying
 
-Connect this repo in the Render dashboard. `render.yaml` handles the configuration.
+**Live deployment (since 2026-08-17): a single Docker container on `al-vps`** (AL's own
+Hetzner VPS — see `MOLIOR-OS/projects/OS/al-vps/`), built from the `Dockerfile` in this repo
+(non-root, read-only rootfs, all capabilities dropped) via `docker-compose.yml`. Exposed to
+the public internet — required for Notion's webhook to reach it — via **Tailscale Funnel**
+(`tailscale funnel --bg --https=8443 http://127.0.0.1:8000`), not a published port; the host's
+firewall stays `default deny incoming` for everything else. Env vars live in a `.env` (mode
+600, gitignored) next to `docker-compose.yml` on the host, not in this repo.
 
-Set all environment variables in the Render dashboard under **Environment** — they are intentionally marked `sync: false` (not stored in the repo). The service starts with:
-
-```
-uvicorn main:app --host 0.0.0.0 --port $PORT
-```
+`render.yaml` is kept for reference/rollback — the service ran on Render (`starter` plan)
+until this migration; that deployment can be resumed by reconnecting the repo in the Render
+dashboard and restoring the same four env vars (`NOTION_WEBHOOK_SECRET` is new, al-vps-only,
+skip it there since Render never had signature verification in the first place).
 
 ---
 
@@ -106,8 +112,8 @@ The service reads/writes through a single internal Notion integration (`NOTION_A
 
 Two mechanisms feed the webhook:
 
-1. **Notion API integration webhook subscription** (recommended, catches pages moved into the DB) — configured on the integration at [notion.so/my-integrations](https://www.notion.so/my-integrations) → **Webhooks**, subscribed to `page.created` and `page.moved`, pointed at `https://al-meeting-notes.onrender.com/webhook/notion`. Requires a one-time verification handshake (Notion POSTs a `verification_token`, which the endpoint logs — copy it from Render logs into the Notion UI to confirm).
-2. **Notion database Automation** (legacy, doesn't reliably fire on moved-in pages) — Automations tab → trigger "Page added" or "Status is not set to Processing/Done/Error" → action "Send a webhook" to the same URL. Can run alongside the integration webhook as a backstop.
+1. **Notion API integration webhook subscription** (recommended, catches pages moved into the DB) — configured on the integration at [notion.so/my-integrations](https://www.notion.so/my-integrations) → **Webhooks**, subscribed to `page.created` and `page.moved`, pointed at the service's `/webhook/notion` URL. Requires a one-time verification handshake (Notion POSTs a `verification_token`, which the endpoint logs — copy it from the container logs into the Notion UI to confirm, **and also set it as `NOTION_WEBHOOK_SECRET`** so subsequent events are signature-verified).
+2. **Notion database Automation** (legacy, doesn't reliably fire on moved-in pages) — Automations tab → trigger "Page added" or "Status is not set to Processing/Done/Error" → action "Send a webhook" to the same URL. Can run alongside the integration webhook as a backstop **only while `NOTION_WEBHOOK_SECRET` is unset** — Notion's legacy Automation webhook has no signing mechanism, so once signature verification is turned on this path gets rejected with 401. Decide whether the backstop is worth leaving the endpoint acceptable to any correctly-shaped unsigned POST, or drop it once the signed subscription is confirmed reliable.
 
 ### Test it
 

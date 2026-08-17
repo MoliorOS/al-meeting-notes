@@ -1,0 +1,28 @@
+# Standalone deployment — no dependency on any other service (gbrain,
+# Postgres, etc). Stateless app; no volumes needed beyond a tmpfs for the
+# tempfile DOCX generation writes to before uploading to Drive.
+services:
+  al-meeting-notes:
+    build: .
+    container_name: al-meeting-notes
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      # Bind loopback-only — the public edge is Tailscale Funnel
+      # (`tailscale funnel --bg --https=8443 http://127.0.0.1:8000`), not a
+      # published Docker port reachable from the LAN/WAN directly.
+      - "127.0.0.1:8000:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
