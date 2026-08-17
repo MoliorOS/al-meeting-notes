@@ -11,6 +11,8 @@ services:
         sync: false
       - key: NOTION_API_KEY
         sync: false
+      - key: NOTION_MEETINGS_DB_ID
+        sync: false
       - key: GOOGLE_DRIVE_FOLDER_ID
         sync: false
       - key: GOOGLE_SERVICE_ACCOUNT_JSON

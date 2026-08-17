@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -5,7 +6,7 @@ import os
 import re
 import tempfile
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
@@ -16,6 +17,7 @@ from llm_pipeline import extract_metadata, structure_sections
 from notion_utils import (
     extract_page_text,
     fetch_meeting_page,
+    find_unprocessed_meetings,
     mark_done,
     mark_error,
     mark_processing,
@@ -39,7 +41,13 @@ def _yy_mm_dd(date_str: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("AL Meeting Notes service starting...")
+    poll_task = asyncio.create_task(_poll_loop())
     yield
+    poll_task.cancel()
+    try:
+        await poll_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(title="AL Meeting Notes Automation", lifespan=lifespan)
@@ -57,31 +65,38 @@ def health():
 def claim_meeting(page_id: str) -> str | None:
     """
     Fast, synchronous portion of the pipeline — cheap enough to run inline
-    before responding to Notion's webhook:
+    before responding to Notion's webhook, and what the poll loop calls once
+    per candidate page each cycle:
 
     1. Check status — skip if already Done or Processing.
-    2. Mark as Processing.
-    3. Fetch the Notion AI meeting recording page.
-    4. Render blocks to LLM-readable text.
+    2. Fetch the Notion AI meeting recording page.
+    3. Check readiness — Notion AI may still be writing the summary.
+    4. Only now mark as Processing (nothing written yet if not ready).
+    5. Render blocks to LLM-readable text.
 
     Returns the page text if the meeting is ready to process, or None if it
     was already Done/Processing and should be skipped. Raises
-    MeetingNotReadyError if Notion AI hasn't finished writing the summary yet.
+    MeetingNotReadyError if Notion AI hasn't finished writing the summary yet
+    — deliberately NOT caught below, so a not-ready page is left with an
+    empty Status (not Error) and retried next cycle instead of being
+    permanently marked failed the moment the poller sees it.
     """
+    status = read_meeting_status(page_id)
+    if status in ("Done", "Processing"):
+        return None
+
     try:
-        status = read_meeting_status(page_id)
-        if status in ("Done", "Processing"):
-            return None
-
-        mark_processing(page_id)
-
         page_data = fetch_meeting_page(page_id)
 
         if not page_data["blocks"]:
             raise MeetingNotReadyError("Meeting page has no summary blocks — Notion AI may still be processing.")
 
+        mark_processing(page_id)
+
         return extract_page_text(page_data)
 
+    except MeetingNotReadyError:
+        raise
     except Exception as e:
         error_msg = str(e)
         print(f"[pipeline] Error claiming {page_id}: {error_msg}")
@@ -157,6 +172,96 @@ def process_meeting_background(page_id: str, page_text: str) -> None:
         run_pipeline(page_id, page_text)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Polling — replaces the Notion webhook as the trigger source. al-vps has no
+# public ingress, so the service calls out to Notion on a timer instead of
+# waiting to be called in. See projects/OS/al-vps/al-meeting-notes-migration-
+# PLAN.md in MOLIOR-OS for why (Notion's webhook sender 502s on the .ts.net
+# Funnel domain regardless of port — ruled out exhaustively, not fixable
+# within Tailscale Funnel).
+# ---------------------------------------------------------------------------
+
+_POLL_INTERVAL_SECONDS = float(os.environ.get("POLL_INTERVAL_SECONDS", "120"))
+_POLL_LOOKBACK_HOURS = float(os.environ.get("POLL_LOOKBACK_HOURS", "48"))
+_POLL_AGE_OUT_HOURS = float(os.environ.get("POLL_AGE_OUT_HOURS", "6"))
+_MEETINGS_DB_ID = os.environ.get("NOTION_MEETINGS_DB_ID", "")
+
+
+def _parse_notion_timestamp(ts: str) -> datetime:
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+def _poll_once() -> int:
+    """
+    One synchronous poll cycle — find candidate pages, process each in turn.
+    Runs entirely on a worker thread (see _poll_loop); safe to make blocking
+    Notion/Claude/Drive calls here.
+
+    Sequential by design: only one page is ever in flight at a time, so no
+    distributed lock is needed to avoid double-processing a page.
+
+    Returns the number of candidate pages seen, for the heartbeat log.
+    """
+    candidates = find_unprocessed_meetings(_MEETINGS_DB_ID, _POLL_LOOKBACK_HOURS)
+
+    for page in candidates:
+        page_id = page["id"]
+        try:
+            page_text = claim_meeting(page_id)
+        except MeetingNotReadyError as e:
+            age_hours = (
+                datetime.now(timezone.utc) - _parse_notion_timestamp(page["created_time"])
+            ).total_seconds() / 3600
+            if age_hours >= _POLL_AGE_OUT_HOURS:
+                print(f"[poll] {page_id} aged out after {age_hours:.1f}h, not ready: {e}")
+                try:
+                    mark_error(page_id, f"Gave up after {_POLL_AGE_OUT_HOURS}h waiting for Notion AI summary: {e}")
+                except Exception:
+                    pass
+            else:
+                print(f"[poll] {page_id} not ready yet ({age_hours:.1f}h old): {e}")
+            continue
+        except Exception as e:
+            # claim_meeting already wrote Status=Error for non-readiness
+            # failures; just log and move on to the next candidate.
+            print(f"[poll] error claiming {page_id}: {e}")
+            continue
+
+        if page_text is None:
+            continue  # already Done/Processing by the time we got to it
+
+        try:
+            run_pipeline(page_id, page_text)
+            print(f"[poll] processed {page_id}")
+        except Exception as e:
+            # run_pipeline already wrote Status=Error; just log and continue.
+            print(f"[poll] error processing {page_id}: {e}")
+
+    return len(candidates)
+
+
+async def _poll_loop() -> None:
+    if not _MEETINGS_DB_ID:
+        print("[poll] NOTION_MEETINGS_DB_ID not set — polling disabled")
+        return
+
+    print(f"[poll] starting: interval={_POLL_INTERVAL_SECONDS}s lookback={_POLL_LOOKBACK_HOURS}h "
+          f"age_out={_POLL_AGE_OUT_HOURS}h db={_MEETINGS_DB_ID}")
+
+    while True:
+        try:
+            count = await asyncio.to_thread(_poll_once)
+            print(f"[poll] cycle complete — {count} candidate(s)")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Never let the loop die — a Notion outage or transient error
+            # this cycle just means we try again next cycle.
+            print(f"[poll] cycle failed: {e}")
+
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 
 # ---------------------------------------------------------------------------

@@ -2,16 +2,18 @@
 Notion API helpers for the Meeting Notes Automation pipeline.
 
 Flow:
-  1. read_meeting_status(page_id)   — check if page is already Processing/Done
-  2. mark_processing(page_id)       — set Status = Processing
-  3. fetch_meeting_page(page_id)    — fetch the meeting recording page, return blocks
-  4. extract_page_text(page_data)   — render blocks as LLM-readable text
-  5. mark_done(page_id, drive_url)  — set Status = Done, write Drive URL
-  6. mark_error(page_id, msg)       — set Status = Error, write error message
+  1. find_unprocessed_meetings(db_id, ...) — poll: find pages with empty Status
+  2. read_meeting_status(page_id)   — check if page is already Processing/Done
+  3. mark_processing(page_id)       — set Status = Processing
+  4. fetch_meeting_page(page_id)    — fetch the meeting recording page, return blocks
+  5. extract_page_text(page_data)   — render blocks as LLM-readable text
+  6. mark_done(page_id, drive_url)  — set Status = Done, write Drive URL
+  7. mark_error(page_id, msg)       — set Status = Error, write error message
 """
 
 import os
 import re
+from datetime import datetime, timedelta, timezone
 
 from notion_client import Client
 
@@ -28,6 +30,45 @@ def _client() -> Client:
 
 def _rt_to_str(rich_text: list) -> str:
     return "".join(r.get("plain_text", "") for r in rich_text).strip()
+
+
+# ---------------------------------------------------------------------------
+# Polling — find candidate pages
+# ---------------------------------------------------------------------------
+
+def find_unprocessed_meetings(db_id: str, lookback_hours: float) -> list[dict]:
+    """
+    Return pages in the Meetings DB with an empty Status, created within the
+    last `lookback_hours`. Sorted oldest-first so the poll loop processes in
+    creation order. Each result carries `id` and `created_time` — enough for
+    the caller to apply an age-out without a second fetch.
+
+    The lookback window is a deliberate backlog guard: pages older than it
+    are left alone (empty Status, untouched) rather than being swept up in
+    bulk the moment polling goes live.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
+    notion = _client()
+    filter_ = {
+        "and": [
+            {"property": "Status", "select": {"is_empty": True}},
+            {"timestamp": "created_time", "created_time": {"on_or_after": cutoff}},
+        ]
+    }
+    sorts = [{"timestamp": "created_time", "direction": "ascending"}]
+
+    results, cursor = [], None
+    while True:
+        kw = {"database_id": db_id, "filter": filter_, "sorts": sorts}
+        if cursor:
+            kw["start_cursor"] = cursor
+        resp = notion.databases.query(**kw)
+        results.extend(resp.get("results", []))
+        if not resp.get("has_more"):
+            break
+        cursor = resp["next_cursor"]
+
+    return [{"id": p["id"], "created_time": p["created_time"]} for p in results]
 
 
 # ---------------------------------------------------------------------------
