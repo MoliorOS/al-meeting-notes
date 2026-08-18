@@ -114,7 +114,10 @@ def _parse_json(raw: str) -> dict | list:
     """
     candidate = _extract_json(raw)
     try:
-        return json.loads(candidate)
+        parsed = json.loads(candidate)
+        if not isinstance(parsed, (dict, list)):
+            raise LLMJSONError(f"Model JSON parsed but isn't an object/array: {type(parsed).__name__}")
+        return parsed
     except json.JSONDecodeError as e:
         print(f"[llm_pipeline] invalid JSON from model ({e}) — attempting repair")
         repair_msg = (
@@ -131,9 +134,12 @@ def _parse_json(raw: str) -> dict | list:
         )
         repaired = _extract_json(resp.content[0].text.strip())
         try:
-            return json.loads(repaired)
+            reparsed = json.loads(repaired)
         except json.JSONDecodeError as e2:
             raise LLMJSONError(f"Model JSON invalid even after repair attempt: {e2}") from e2
+        if not isinstance(reparsed, (dict, list)):
+            raise LLMJSONError(f"Repaired JSON isn't an object/array: {type(reparsed).__name__}")
+        return reparsed
 
 
 def extract_metadata(page_text: str) -> dict:
