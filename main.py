@@ -91,12 +91,12 @@ def claim_meeting(page_id: str) -> str | None:
         if not page_data["blocks"]:
             raise MeetingNotReadyError("Meeting page has no summary blocks — Notion AI may still be processing.")
 
-        if not any(b.get("type") == "meeting_notes" for b in page_data["blocks"]):
-            # A `transcription` block (raw transcript, no AI summary yet) can
-            # exist well before Notion generates the `meeting_notes` block
-            # this pipeline actually reads. Treating that as "ready" sends the
-            # LLM near-empty content, which fails unpredictably instead of
-            # cleanly retrying.
+        if not page_data["ready"]:
+            # The page's `transcription` block exists (raw transcript) but
+            # Notion AI hasn't finished writing the summary yet
+            # (`status` != "notes_ready", no `summary_block_id`). Treating
+            # that as "ready" sends the LLM near-empty content, which fails
+            # unpredictably instead of cleanly retrying.
             raise MeetingNotReadyError(
                 "Meeting page has no AI-generated summary yet (transcript only) — Notion AI may still be processing."
             )

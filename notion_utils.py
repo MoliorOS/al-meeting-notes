@@ -165,15 +165,38 @@ def _extract_attendees(meeting_notes_block: dict) -> list[str]:
     return names
 
 
+def _resolve_user_names(notion: Client, user_ids: list[str]) -> list[str]:
+    """Resolve Notion user IDs to display names, falling back to the raw ID
+    for any lookup that fails (e.g. a deactivated/guest user)."""
+    names = []
+    for uid in user_ids:
+        try:
+            user = notion.users.retrieve(uid)
+            names.append(user.get("name") or uid)
+        except Exception:
+            names.append(uid)
+    return names
+
+
 def fetch_meeting_page(page_id: str) -> dict:
     """
     Fetch a Notion meeting recording page.
     Only the AI-generated summary section is extracted — not notes or transcript.
 
+    Notion's AI meeting-notes block ships as a `transcription` block type
+    (not the older `meeting_notes` type this pipeline originally targeted):
+    `transcription.status` reports where Notion AI is in generating the
+    summary ("notes_ready" once done), and the actual summary content lives
+    in a separate block referenced by `transcription.children.summary_block_id`
+    — it has to be fetched separately, it's not inline. The `meeting_notes`
+    path below is kept as a fallback in case Notion serves that older shape
+    for some pages.
+
     Returns:
         title     str       — page title
         blocks    list      — summary blocks only
-        attendees list[str] — names from the meeting_notes attendee list (may be empty)
+        attendees list[str] — attendee names (may be empty)
+        ready     bool      — True once the AI summary is actually available
     """
     notion = _client()
     page = notion.pages.retrieve(page_id)
@@ -189,18 +212,30 @@ def fetch_meeting_page(page_id: str) -> dict:
     top = notion.blocks.children.list(block_id=page_id)
     all_blocks: list = []
     attendees: list[str] = []
+    ready = False
 
     for block in top.get("results", []):
         btype = block.get("type", "")
         all_blocks.append(block)
-        if btype == "meeting_notes":
+        if btype == "transcription":
+            transcription = block.get("transcription", {})
+            attendee_ids = transcription.get("calendar_event", {}).get("attendees", [])
+            if attendee_ids:
+                attendees = _resolve_user_names(notion, attendee_ids)
+            if transcription.get("status") == "notes_ready":
+                summary_block_id = transcription.get("children", {}).get("summary_block_id")
+                if summary_block_id:
+                    all_blocks.extend(_blocks_flat(notion, summary_block_id))
+                    ready = True
+        elif btype == "meeting_notes":
             attendees = _extract_attendees(block)
             if block.get("has_children"):
                 all_blocks.extend(_summary_blocks_from_meeting_notes(notion, block["id"]))
+                ready = True
         elif block.get("has_children"):
             all_blocks.extend(_blocks_flat(notion, block["id"]))
 
-    return {"title": title, "blocks": all_blocks, "attendees": attendees}
+    return {"title": title, "blocks": all_blocks, "attendees": attendees, "ready": ready}
 
 
 # ---------------------------------------------------------------------------
