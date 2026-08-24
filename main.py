@@ -18,12 +18,14 @@ from notion_utils import (
     extract_page_text,
     fetch_meeting_page,
     find_unprocessed_meetings,
+    get_parent_database_id,
     mark_done,
     mark_error,
     mark_processing,
     read_meeting_status,
 )
 from scripts.generate_docx import generate_docx
+from targets import load_targets
 
 
 class MeetingNotReadyError(Exception):
@@ -55,7 +57,11 @@ app = FastAPI(title="AL Meeting Notes Automation", lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "al-meeting-notes"}
+    return {
+        "status": "ok",
+        "service": "al-meeting-notes",
+        "targets": [t["name"] for t in _TARGETS],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +123,7 @@ def claim_meeting(page_id: str) -> str | None:
         raise
 
 
-def run_pipeline(page_id: str, page_text: str) -> dict:
+def run_pipeline(page_id: str, page_text: str, folder_id: str | None = None) -> dict:
     """
     Slow portion of the pipeline — LLM calls, DOCX generation, Drive upload.
     Runs after Notion has already been ack'd, so it isn't subject to the
@@ -127,7 +133,8 @@ def run_pipeline(page_id: str, page_text: str) -> dict:
     6. Structure sections (LLM).
     7. Assemble final JSON.
     8. Generate DOCX from template.
-    9. Upload to Google Drive.
+    9. Upload to Google Drive (target-specific folder_id, resolved by the
+       caller — see _resolve_target_for_page).
     10. Mark as Done with Drive URL.
     """
     try:
@@ -144,7 +151,7 @@ def run_pipeline(page_id: str, page_text: str) -> dict:
             tmp_path = tmp.name
 
         generate_docx(doc_data, Path(tmp_path))
-        drive_url = upload_to_drive(tmp_path, filename)
+        drive_url = upload_to_drive(tmp_path, filename, folder_id=folder_id)
 
         mark_done(page_id, drive_url)
 
@@ -167,19 +174,41 @@ def run_pipeline(page_id: str, page_text: str) -> dict:
         raise
 
 
+def _resolve_target_for_page(page_id: str) -> dict | None:
+    """
+    Match a bare page_id to its target by looking up the page's parent
+    database ID. Needed by /manual and the webhook path, which only ever
+    receive a page_id — unlike the poll loop, which already knows which
+    target it queried candidates from and passes the folder straight
+    through without this lookup.
+    """
+    db_id = get_parent_database_id(page_id)
+    if db_id is None:
+        return None
+    for target in _TARGETS:
+        if target["notion_db_id"].replace("-", "") == db_id:
+            return target
+    return None
+
+
 def process_meeting(page_id: str) -> dict:
     """Full pipeline, run synchronously start to finish. Used by /manual."""
     page_text = claim_meeting(page_id)
     if page_text is None:
         return {"status": "skipped", "reason": "page is already Done or Processing"}
-    return run_pipeline(page_id, page_text)
+    target = _resolve_target_for_page(page_id)
+    if target is None:
+        raise ValueError(f"page {page_id} does not belong to any configured target (targets.json)")
+    return run_pipeline(page_id, page_text, folder_id=target["google_drive_folder_id"])
 
 
 def process_meeting_background(page_id: str, page_text: str) -> None:
     """Fire-and-forget wrapper for BackgroundTasks — errors are already
     recorded on the page by run_pipeline, nothing left to propagate to."""
     try:
-        run_pipeline(page_id, page_text)
+        target = _resolve_target_for_page(page_id)
+        folder_id = target["google_drive_folder_id"] if target else None
+        run_pipeline(page_id, page_text, folder_id=folder_id)
     except Exception:
         pass
 
@@ -196,17 +225,18 @@ def process_meeting_background(page_id: str, page_text: str) -> None:
 _POLL_INTERVAL_SECONDS = float(os.environ.get("POLL_INTERVAL_SECONDS", "120"))
 _POLL_LOOKBACK_HOURS = float(os.environ.get("POLL_LOOKBACK_HOURS", "48"))
 _POLL_AGE_OUT_HOURS = float(os.environ.get("POLL_AGE_OUT_HOURS", "6"))
-_MEETINGS_DB_ID = os.environ.get("NOTION_MEETINGS_DB_ID", "")
+_TARGETS = load_targets()
 
 
 def _parse_notion_timestamp(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
-def _poll_once() -> int:
+def _poll_target(target: dict) -> int:
     """
-    One synchronous poll cycle — find candidate pages, process each in turn.
-    Runs entirely on a worker thread (see _poll_loop); safe to make blocking
+    One synchronous poll cycle for a single target — find candidate pages in
+    its Notion DB, process each in turn, uploading to its Drive folder.
+    Runs on a worker thread (see _poll_loop); safe to make blocking
     Notion/Claude/Drive calls here.
 
     Sequential by design: only one page is ever in flight at a time, so no
@@ -214,7 +244,11 @@ def _poll_once() -> int:
 
     Returns the number of candidate pages seen, for the heartbeat log.
     """
-    candidates = find_unprocessed_meetings(_MEETINGS_DB_ID, _POLL_LOOKBACK_HOURS)
+    name = target["name"]
+    db_id = target["notion_db_id"]
+    folder_id = target["google_drive_folder_id"]
+
+    candidates = find_unprocessed_meetings(db_id, _POLL_LOOKBACK_HOURS)
 
     for page in candidates:
         page_id = page["id"]
@@ -225,45 +259,61 @@ def _poll_once() -> int:
                 datetime.now(timezone.utc) - _parse_notion_timestamp(page["created_time"])
             ).total_seconds() / 3600
             if age_hours >= _POLL_AGE_OUT_HOURS:
-                print(f"[poll] {page_id} aged out after {age_hours:.1f}h, not ready: {e}")
+                print(f"[poll:{name}] {page_id} aged out after {age_hours:.1f}h, not ready: {e}")
                 try:
                     mark_error(page_id, f"Gave up after {_POLL_AGE_OUT_HOURS}h waiting for Notion AI summary: {e}")
                 except Exception:
                     pass
             else:
-                print(f"[poll] {page_id} not ready yet ({age_hours:.1f}h old): {e}")
+                print(f"[poll:{name}] {page_id} not ready yet ({age_hours:.1f}h old): {e}")
             continue
         except Exception as e:
             # claim_meeting already wrote Status=Error for non-readiness
             # failures; just log and move on to the next candidate.
-            print(f"[poll] error claiming {page_id}: {e}")
+            print(f"[poll:{name}] error claiming {page_id}: {e}")
             continue
 
         if page_text is None:
             continue  # already Done/Processing by the time we got to it
 
         try:
-            run_pipeline(page_id, page_text)
-            print(f"[poll] processed {page_id}")
+            run_pipeline(page_id, page_text, folder_id=folder_id)
+            print(f"[poll:{name}] processed {page_id}")
         except Exception as e:
             # run_pipeline already wrote Status=Error; just log and continue.
-            print(f"[poll] error processing {page_id}: {e}")
+            print(f"[poll:{name}] error processing {page_id}: {e}")
 
     return len(candidates)
 
 
+def _poll_once() -> int:
+    """
+    One cycle across every configured target. A target whose Notion DB the
+    integration can't reach (not yet shared, bad ID) logs and is skipped —
+    it must never take down polling for the other targets.
+    """
+    total = 0
+    for target in _TARGETS:
+        try:
+            total += _poll_target(target)
+        except Exception as e:
+            print(f"[poll:{target['name']}] cycle failed: {e}")
+    return total
+
+
 async def _poll_loop() -> None:
-    if not _MEETINGS_DB_ID:
-        print("[poll] NOTION_MEETINGS_DB_ID not set — polling disabled")
+    if not _TARGETS:
+        print("[poll] no targets configured (targets.json missing or empty) — polling disabled")
         return
 
+    names = ", ".join(t["name"] for t in _TARGETS)
     print(f"[poll] starting: interval={_POLL_INTERVAL_SECONDS}s lookback={_POLL_LOOKBACK_HOURS}h "
-          f"age_out={_POLL_AGE_OUT_HOURS}h db={_MEETINGS_DB_ID}")
+          f"age_out={_POLL_AGE_OUT_HOURS}h targets=[{names}]")
 
     while True:
         try:
             count = await asyncio.to_thread(_poll_once)
-            print(f"[poll] cycle complete — {count} candidate(s)")
+            print(f"[poll] cycle complete — {count} candidate(s) across {len(_TARGETS)} target(s)")
         except asyncio.CancelledError:
             raise
         except Exception as e:

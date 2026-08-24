@@ -8,6 +8,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    volumes:
+      # Multi-tenant target list — bind-mounted so adding/editing a target is
+      # a host-side edit + `docker compose restart`, no image rebuild.
+      - ./targets.json:/app/targets.json:ro
     ports:
       # Bind loopback-only — the public edge is Tailscale Funnel
       # (`tailscale funnel --bg --https=8443 http://127.0.0.1:8000`), not a

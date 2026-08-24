@@ -75,6 +75,20 @@ def find_unprocessed_meetings(db_id: str, lookback_hours: float) -> list[dict]:
 # Meeting page status operations
 # ---------------------------------------------------------------------------
 
+def get_parent_database_id(page_id: str) -> str | None:
+    """
+    Return the (dashless) database ID a page lives in, or None if its parent
+    isn't a database. Used to route a bare page_id (from /manual or the
+    webhook, where the caller doesn't know which target it belongs to) to
+    the right target's Drive folder by matching against targets.json.
+    """
+    page = _client().pages.retrieve(page_id)
+    parent = page.get("parent", {})
+    if parent.get("type") != "database_id":
+        return None
+    return parent["database_id"].replace("-", "")
+
+
 def read_meeting_status(page_id: str) -> str:
     """Read the Status select value from a meeting page. Returns '' if not set."""
     page = _client().pages.retrieve(page_id)
