@@ -2,12 +2,14 @@
 
 **A Notion-native pipeline that turns a Notion AI meeting recording into a branded AL Word document — automatically.**
 
-The service polls the AL Meetings database on a timer, reads the Notion AI summary from any
-newly-appeared page, runs it through Claude, builds a formatted DOCX using AL's branded template,
-uploads it to Google Drive, and writes the Drive link back into Notion. No one touches a template.
-No one copies text.
+The service polls one or more Notion "Meetings" databases on a timer (multi-tenant — see
+`targets.json`), reads the Notion AI summary from any newly-appeared page, runs it through
+Claude, builds a formatted DOCX using AL's branded template, uploads it to that target's Google
+Drive folder, and writes the Drive link back into Notion. No one touches a template. No one
+copies text.
 
-Live service: a Docker container on `al-vps` (AL's own VPS — see `MOLIOR-OS/projects/OS/al-vps/`).
+Live service: a single Docker container on `al-vps` (AL's own VPS — see
+`MOLIOR-OS/projects/OS/al-vps/`), currently running two targets — see "Live targets" below.
 
 ---
 
@@ -61,6 +63,21 @@ The webhook code (below) is kept in the repo, unused, as what makes a Render rol
 
 ---
 
+## Live targets
+
+The current `targets.json` on al-vps (host-side, not in this repo):
+
+| Target | Notion DB | Drive folder | Live since |
+|---|---|---|---|
+| `meetings` | 💬 Meetings DB | shared "AL client" folder | 2026-08-04 (Render), migrated to al-vps 2026-08-17 |
+| `admin-meetings` | 💬 Admin Meetings DB | `0005_Adminstration Notes` (Shared Drive) | 2026-08-24 |
+
+`admin-meetings` was the first target onboarded after multi-tenant support shipped — see
+"Adding a new target" below for the procedure, or run the `/add-source` Claude Code command in
+this repo to walk through it interactively.
+
+---
+
 ## Endpoints
 
 | Method | Path | Description |
@@ -97,6 +114,8 @@ assets/
   al_logo.jpg            # AL logo (embedded in generated documents)
 render.yaml              # Render deployment config
 requirements.txt
+.claude/commands/
+  add-source.md          # /add-source — onboarding runbook for a new tenant, as a Claude Code command
 ```
 
 ---
@@ -173,8 +192,13 @@ The whole point of `targets.json` is that this is a config change, not a code ch
 2. Share the new database with the **AL Notion Automations** integration (`...` → **Connections**
    → add the integration).
 3. Create a new Google Drive folder and share it with the service account's `client_email` (from
-   `GOOGLE_SERVICE_ACCOUNT_JSON` — currently `al-notion-gws@molior-gws.iam.gserviceaccount.com`),
-   **Editor** access.
+   `GOOGLE_SERVICE_ACCOUNT_JSON` — currently `al-notion-gws@molior-gws.iam.gserviceaccount.com`).
+   **Editor** on a regular folder, or **Contributor** if it's inside a Shared Drive — both are
+   sufficient (`upload_to_drive` only ever creates files, never deletes/moves/shares). Confirmed
+   2026-08-24: a Shared Drive can also have an org policy that blocks even Contributor from
+   permanently deleting its own uploads — harmless for this pipeline (it never deletes), but means
+   any manual test files uploaded during onboarding need a human with higher access to remove
+   them.
 4. On the host, append one entry to `targets.json`:
    ```json
    { "name": "<short-label-for-logs>", "notion_db_id": "<32-char db id>", "google_drive_folder_id": "<folder id from its Drive URL>" }
@@ -225,10 +249,29 @@ reaches `Done` with no `Document` link — see Troubleshooting).
 
 To add the first (or an additional) folder:
 
-1. Create the Drive folder.
-2. Share it with the service account's email address (found in the JSON key as `client_email`).
+1. Create the Drive folder (a regular My Drive folder or a folder inside a Shared Drive both work).
+2. Share it with the service account's email address (found in the JSON key as `client_email`) —
+   **Editor** (regular folder) or **Contributor** (Shared Drive).
 3. Add its folder ID (from the Drive URL, `https://drive.google.com/drive/folders/<folder_id>`)
    to the corresponding entry in `targets.json` — see "Adding a new target" above.
+
+To verify access without waiting for a real meeting, run the exact upload path the pipeline uses
+from inside the running container:
+
+```bash
+docker exec al-meeting-notes python3 -c "
+from drive import upload_to_drive
+import tempfile
+with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
+    tmp.write(b'access test')
+    path = tmp.name
+print(upload_to_drive(path, 'access-test.docx', folder_id='<folder_id>'))
+"
+```
+
+A returned URL confirms write access. Delete the test file afterward — note it may need to be
+deleted by a human with folder-owner-level access if it lands in a Shared Drive with delete
+restrictions (see "Adding a new target" above).
 
 ---
 

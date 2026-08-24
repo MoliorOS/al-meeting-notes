@@ -10,3 +10,4 @@ venv/
 !assets/template.docx
 .DS_Store
 sa-key.json
+.env.bak-*
