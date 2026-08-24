@@ -13,7 +13,7 @@ Flow:
 
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from notion_client import Client
 
@@ -36,25 +36,15 @@ def _rt_to_str(rich_text: list) -> str:
 # Polling — find candidate pages
 # ---------------------------------------------------------------------------
 
-def find_unprocessed_meetings(db_id: str, lookback_hours: float) -> list[dict]:
+def find_unprocessed_meetings(db_id: str) -> list[dict]:
     """
-    Return pages in the Meetings DB with an empty Status, created within the
-    last `lookback_hours`. Sorted oldest-first so the poll loop processes in
-    creation order. Each result carries `id` and `created_time` — enough for
-    the caller to apply an age-out without a second fetch.
-
-    The lookback window is a deliberate backlog guard: pages older than it
-    are left alone (empty Status, untouched) rather than being swept up in
-    bulk the moment polling goes live.
+    Return every page in the Meetings DB with an empty Status, regardless of
+    age. Sorted oldest-first so the poll loop processes in creation order.
+    Each result carries `id` and `created_time` — enough for the caller to
+    apply an age-out without a second fetch.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
     notion = _client()
-    filter_ = {
-        "and": [
-            {"property": "Status", "select": {"is_empty": True}},
-            {"timestamp": "created_time", "created_time": {"on_or_after": cutoff}},
-        ]
-    }
+    filter_ = {"property": "Status", "select": {"is_empty": True}}
     sorts = [{"timestamp": "created_time", "direction": "ascending"}]
 
     results, cursor = [], None

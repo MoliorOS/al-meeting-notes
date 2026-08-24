@@ -26,8 +26,8 @@ Poll loop wakes up every POLL_INTERVAL_SECONDS (default 2 min)
     an independent {name, notion_db_id, google_drive_folder_id}; one target
     failing (DB not shared yet, bad ID) is logged and skipped, never blocks
     the others
-1.  Query that target's Meetings DB for pages with empty Status, created
-    within POLL_LOOKBACK_HOURS — skip everything else
+1.  Query that target's Meetings DB for pages with empty Status — no age
+    limit, every unprocessed page is a candidate
 2.  For each candidate, fetch the Notion AI meeting page (title + attendees + AI summary blocks)
 3.  Not ready yet (no summary blocks)? Leave Status empty, retry next cycle —
     unless POLL_AGE_OUT_HOURS has passed, then mark Status = Error and stop retrying
@@ -87,8 +87,9 @@ this repo to walk through it interactively.
 | `POST` | `/webhook/notion` | Main webhook receiver — unused on al-vps, same reason |
 | `GET` | `/manual?page_id=<id>` | Manually trigger the pipeline for a specific page |
 
-The `/manual` endpoint is also the fallback for any page the poller's lookback window skips (e.g.
-something older than `POLL_LOOKBACK_HOURS` that you still want processed). It resolves which
+The `/manual` endpoint is also useful for re-running a page that errored out or got stuck
+(e.g. Notion AI hadn't generated a summary in time and the page aged out — see
+`POLL_AGE_OUT_HOURS` below). It resolves which
 target (and therefore which Drive folder) a page belongs to by looking up the page's parent
 database ID against `targets.json` — the page must live in a database listed there, or `/manual`
 returns a 400.
@@ -129,7 +130,6 @@ requirements.txt
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Yes | Full Google service account JSON (as a string) — shared across every target; each target's Drive folder must be individually shared with this service account |
 | `TARGETS_FILE` | No (default `targets.json`) | Path to the multi-tenant config file — see "Adding a new target" below |
 | `POLL_INTERVAL_SECONDS` | No (default `120`) | How often the poll loop checks every target's DB |
-| `POLL_LOOKBACK_HOURS` | No (default `48`) | Ignore pages older than this — a backlog guard so turning polling on doesn't sweep up everything ever left unprocessed |
 | `POLL_AGE_OUT_HOURS` | No (default `6`) | If a page still has no summary blocks after this long, give up and mark it `Error` instead of retrying forever |
 | `NOTION_WEBHOOK_SECRET` | No | Unused on al-vps (nothing calls the webhook there). Only relevant if the Render deployment is ever brought back — see "The webhook path (unused, kept for Render rollback)" below. |
 
@@ -288,7 +288,7 @@ restrictions (see "Adding a new target" above).
 
 **Status stuck on Processing** — the pipeline crashed before it could write Error. Check `docker logs al-meeting-notes` on al-vps for the page ID. Use `/manual?page_id=...` to retry once the underlying issue is fixed — the pipeline checks status at the start and will re-run since the page never reached Done.
 
-**Page never picked up, Status stays empty** — most likely it's outside `POLL_LOOKBACK_HOURS` (default 48h — anything created before that is deliberately ignored to avoid a bulk backlog sweep). Use `/manual?page_id=...` to process it directly regardless of age.
+**Page never picked up, Status stays empty** — check `docker logs al-meeting-notes` for a `[poll:<target>] cycle failed` line (DB not shared with the integration, bad ID) or an error for that specific page ID. Use `/manual?page_id=...` to process it directly.
 
 **Status = Error, Notes says "Gave up after Nh waiting for Notion AI summary"** — the page never got summary blocks within `POLL_AGE_OUT_HOURS` (default 6h), usually because it's a placeholder page Notion AI never finished (or never started) writing to. Check the page in Notion; if it's a real meeting waiting on a slow AI summary, hit `/manual?page_id=...` once the summary appears.
 

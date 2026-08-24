@@ -223,7 +223,6 @@ def process_meeting_background(page_id: str, page_text: str) -> None:
 # ---------------------------------------------------------------------------
 
 _POLL_INTERVAL_SECONDS = float(os.environ.get("POLL_INTERVAL_SECONDS", "120"))
-_POLL_LOOKBACK_HOURS = float(os.environ.get("POLL_LOOKBACK_HOURS", "48"))
 _POLL_AGE_OUT_HOURS = float(os.environ.get("POLL_AGE_OUT_HOURS", "6"))
 _TARGETS = load_targets()
 
@@ -248,7 +247,7 @@ def _poll_target(target: dict) -> int:
     db_id = target["notion_db_id"]
     folder_id = target["google_drive_folder_id"]
 
-    candidates = find_unprocessed_meetings(db_id, _POLL_LOOKBACK_HOURS)
+    candidates = find_unprocessed_meetings(db_id)
 
     for page in candidates:
         page_id = page["id"]
@@ -307,7 +306,7 @@ async def _poll_loop() -> None:
         return
 
     names = ", ".join(t["name"] for t in _TARGETS)
-    print(f"[poll] starting: interval={_POLL_INTERVAL_SECONDS}s lookback={_POLL_LOOKBACK_HOURS}h "
+    print(f"[poll] starting: interval={_POLL_INTERVAL_SECONDS}s "
           f"age_out={_POLL_AGE_OUT_HOURS}h targets=[{names}]")
 
     while True:
