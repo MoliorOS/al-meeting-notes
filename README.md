@@ -69,7 +69,7 @@ The current `targets.json` on al-vps (host-side, not in this repo):
 
 | Target | Notion DB | Drive folder | Live since |
 |---|---|---|---|
-| `meetings` | 💬 Meetings DB | shared "AL client" folder | 2026-08-04 (Render), migrated to al-vps 2026-08-17 |
+| `general-meetings` | 💬 General Meetings DB | shared "AL client" folder | 2026-08-04 (Render), migrated to al-vps 2026-08-17; renamed from "Meetings DB" 2026-08-24 |
 | `admin-meetings` | 💬 Admin Meetings DB | `0005_Adminstration Notes` (Shared Drive) | 2026-08-24 |
 
 `admin-meetings` was the first target onboarded after multi-tenant support shipped — see
@@ -165,7 +165,7 @@ signature verification too).
 
 ## Notion setup
 
-Every target's database needs the same four properties as the original Meetings DB:
+Every target's database needs the same four properties as the original General Meetings DB:
 
 | Property | Type | Purpose |
 |---|---|---|
@@ -186,7 +186,7 @@ No webhook or Automation needs to be configured — the service finds new pages 
 
 The whole point of `targets.json` is that this is a config change, not a code change:
 
-1. **Duplicate the Meetings DB** in Notion (`...` → **Duplicate**) rather than building a fresh
+1. **Duplicate the General Meetings DB** in Notion (`...` → **Duplicate**) rather than building a fresh
    database from scratch — this guarantees the schema (property names, `Status` select options)
    matches exactly, which the pipeline depends on.
 2. Share the new database with the **AL Notion Automations** integration (`...` → **Connections**

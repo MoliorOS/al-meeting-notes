@@ -25,7 +25,7 @@ a different target.
 
 Fetch the new database (via whatever Notion access this session has — MCP fetch tool if
 connected, otherwise ask the operator to confirm) and check it has exactly these properties,
-matching the canonical Meetings DB:
+matching the canonical General Meetings DB:
 
 | Property | Type | Notes |
 |---|---|---|
@@ -35,7 +35,7 @@ matching the canonical Meetings DB:
 | `Document` | URL | — |
 | `Status` | Select | Options must be exactly `Processing`, `Done`, `Error` |
 
-If the operator says the new DB was created by **duplicating** the Meetings DB, this is
+If the operator says the new DB was created by **duplicating** the General Meetings DB, this is
 guaranteed and you can skip a full property-by-property check — just confirm the `Status` select
 options match. If it was hand-built, verify all five properties explicitly; a schema mismatch
 will surface as silent failures later, not a clean error at onboarding time.
